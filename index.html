@@ -172,7 +172,7 @@
         <div class="flex items-center gap-3 min-w-0">
           <div class="bg-white/15 text-white p-2 rounded-lg text-xl">📄</div>
           <h1 class="text-lg md:text-xl font-bold tracking-tight truncate">De ISUS a PRA</h1>
-          <!-- Chip dinámico de versión (se rellena desde sw.js) -->
+          <!-- Chip dinámico de versión (se rellena desde el SW o desde sw.js) -->
           <span id="appVersionChip"
                 class="hidden inline-flex items-center gap-1 bg-white/15 hover:bg-white/25 text-white text-[11px] font-semibold px-2 py-0.5 rounded-full border border-white/25 backdrop-blur-sm"
                 title="Versión de la aplicación">
@@ -1866,23 +1866,48 @@
       document.body.removeChild(a); URL.revokeObjectURL(url);
     }
 
-    // --- Chip dinámico de versión (lee CACHE_NAME del sw.js) ---
-    // Estrategia robusta:
-    //  1) Cache-busting con ?ts=<timestamp> para esquivar la caché del SW y la HTTP.
-    //  2) Varios paths candidatos por si el absoluto falla.
-    //  3) Intento con y sin query param (por servidores que rechacen query strings).
-    //  4) Normaliza el valor (quita prefijo "isustopra-", garantiza "v" delante).
-    async function loadAppVersion() {
-      const chip = document.getElementById('appVersionChip');
-      const textEl = document.getElementById('appVersionText');
-      if (!chip || !textEl) return;
+    // --- Chip dinámico de versión ---
+    // Estrategia (en orden):
+    //   1) postMessage al Service Worker activo pidiendo GET_VERSION (rápido, sin red).
+    //   2) fetch con cache-busting a /ISUStoPRA/sw.js y ./sw.js (por si el SW aún no controla).
+    //   3) Fallback final: "vdev".
+    function normalizeVersion(raw) {
+      let v = raw ? String(raw).replace(/^isustopra[-_]?/i, '').trim() : '';
+      if (!v) v = 'dev';
+      if (!/^v/i.test(v)) v = 'v' + v;
+      return v;
+    }
 
-      let rawVersion = null;
+    function getVersionFromSW() {
+      return new Promise((resolve) => {
+        if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) {
+          resolve(null); return;
+        }
+        let done = false;
+        const cleanup = (val) => {
+          if (done) return;
+          done = true;
+          navigator.serviceWorker.removeEventListener('message', handler);
+          resolve(val);
+        };
+        const handler = (event) => {
+          const d = event.data || {};
+          if (d.type === 'SW_VERSION' && d.version) cleanup(d.version);
+        };
+        navigator.serviceWorker.addEventListener('message', handler);
+        try {
+          navigator.serviceWorker.controller.postMessage({ type: 'GET_VERSION' });
+        } catch (e) {
+          cleanup(null); return;
+        }
+        // Timeout de seguridad por si el SW no responde
+        setTimeout(() => cleanup(null), 800);
+      });
+    }
+
+    async function getVersionFromFile() {
       const candidates = ['/ISUStoPRA/sw.js', './sw.js'];
-
-      outer:
       for (const path of candidates) {
-        // Probar primero con cache-busting (lo más fiable), luego sin él
         for (const useBust of [true, false]) {
           try {
             const url = useBust
@@ -1895,23 +1920,28 @@
             }
             const src = await res.text();
             const m = src.match(/CACHE_NAME\s*=\s*['"`]([^'"`]+)['"`]/);
-            if (m && m[1]) {
-              rawVersion = m[1];
-              break outer;
-            } else {
-              console.debug('[Versión] CACHE_NAME no encontrado en', url, '— primeros 80 chars:', src.slice(0, 80));
-            }
+            if (m && m[1]) return m[1];
+            console.debug('[Versión] CACHE_NAME no encontrado en', url, '— primeros 80 chars:', src.slice(0, 80));
           } catch (err) {
             console.debug('[Versión] Error leyendo', path, err);
           }
         }
       }
+      return null;
+    }
 
-      // Normaliza el valor para mostrar
-      let version = rawVersion ? String(rawVersion).replace(/^isustopra[-_]?/i, '').trim() : '';
-      if (!version) version = 'dev';
-      if (!/^v/i.test(version)) version = 'v' + version;
+    async function loadAppVersion() {
+      const chip = document.getElementById('appVersionChip');
+      const textEl = document.getElementById('appVersionText');
+      if (!chip || !textEl) return;
 
+      // 1) Preguntar al SW activo
+      let raw = await getVersionFromSW();
+
+      // 2) Si no respondió, leer sw.js por red
+      if (!raw) raw = await getVersionFromFile();
+
+      const version = normalizeVersion(raw);
       textEl.textContent = version;
       chip.title = `Versión de la aplicación: ${version}`;
       chip.classList.remove('hidden');
@@ -1933,6 +1963,27 @@
       if (allButton) allButton.classList.add('active');
       loadAppVersion();
     });
+
+    // --- Escucha mensajes del SW para refrescar la versión ---
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        const d = event.data || {};
+        if (d.type === 'SW_VERSION' && d.version) {
+          const v = normalizeVersion(d.version);
+          const textEl = document.getElementById('appVersionText');
+          const chip = document.getElementById('appVersionChip');
+          if (textEl && chip) {
+            textEl.textContent = v;
+            chip.title = `Versión de la aplicación: ${v}`;
+            chip.classList.remove('hidden');
+            document.documentElement.setAttribute('data-app-version', v);
+          }
+        } else if (d.type === 'SW_ACTIVATED' && d.version) {
+          // Nueva versión activada: refrescamos el chip
+          loadAppVersion();
+        }
+      });
+    }
   </script>
 	<script>
 	if ('serviceWorker' in navigator) {
