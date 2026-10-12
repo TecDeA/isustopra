@@ -1867,38 +1867,54 @@
     }
 
     // --- Chip dinámico de versión (lee CACHE_NAME del sw.js) ---
+    // Estrategia robusta:
+    //  1) Cache-busting con ?ts=<timestamp> para esquivar la caché del SW y la HTTP.
+    //  2) Varios paths candidatos por si el absoluto falla.
+    //  3) Intento con y sin query param (por servidores que rechacen query strings).
+    //  4) Normaliza el valor (quita prefijo "isustopra-", garantiza "v" delante).
     async function loadAppVersion() {
       const chip = document.getElementById('appVersionChip');
       const textEl = document.getElementById('appVersionText');
       if (!chip || !textEl) return;
 
-      let version = null;
-      try {
-        // cache: 'no-store' fuerza la lectura desde red para no servir una versión antigua
-        const res = await fetch('/ISUStoPRA/sw.js', { cache: 'no-store' });
-        if (res.ok) {
-          const src = await res.text();
-          // Extrae el valor de CACHE_NAME, p. ej.  const CACHE_NAME = 'isustopra-v2';
-          const match = src.match(/CACHE_NAME\s*=\s*['"`]([^'"`]+)['"`]/);
-          if (match && match[1]) {
-            // Quita el prefijo "isustopra-" (o "isustopra_") para dejar solo la versión
-            version = match[1].replace(/^isustopra[-_]?/i, '').trim() || match[1];
+      let rawVersion = null;
+      const candidates = ['/ISUStoPRA/sw.js', './sw.js'];
+
+      outer:
+      for (const path of candidates) {
+        // Probar primero con cache-busting (lo más fiable), luego sin él
+        for (const useBust of [true, false]) {
+          try {
+            const url = useBust
+              ? path + (path.includes('?') ? '&' : '?') + '_=' + Date.now()
+              : path;
+            const res = await fetch(url, { cache: 'no-store' });
+            if (!res.ok) {
+              console.debug('[Versión] fetch', url, '→', res.status);
+              continue;
+            }
+            const src = await res.text();
+            const m = src.match(/CACHE_NAME\s*=\s*['"`]([^'"`]+)['"`]/);
+            if (m && m[1]) {
+              rawVersion = m[1];
+              break outer;
+            } else {
+              console.debug('[Versión] CACHE_NAME no encontrado en', url, '— primeros 80 chars:', src.slice(0, 80));
+            }
+          } catch (err) {
+            console.debug('[Versión] Error leyendo', path, err);
           }
         }
-      } catch (err) {
-        console.warn('[Versión] No se pudo leer sw.js:', err);
       }
 
-      // Fallback si no pudimos obtenerla
+      // Normaliza el valor para mostrar
+      let version = rawVersion ? String(rawVersion).replace(/^isustopra[-_]?/i, '').trim() : '';
       if (!version) version = 'dev';
-      // Prefijo "v" si no lo lleva ya
       if (!/^v/i.test(version)) version = 'v' + version;
 
       textEl.textContent = version;
       chip.title = `Versión de la aplicación: ${version}`;
       chip.classList.remove('hidden');
-
-      // Marca la versión en el <html> por si se quiere consultar por CSS
       document.documentElement.setAttribute('data-app-version', version);
     }
 
@@ -1915,7 +1931,6 @@
       goToScreen(1); updateLoadedEvaluationsUI();
       const allButton = document.getElementById('filterAll');
       if (allButton) allButton.classList.add('active');
-      // Intenta cargar la versión lo antes posible (aunque load() tarde)
       loadAppVersion();
     });
   </script>
@@ -1924,10 +1939,16 @@
 	  navigator.serviceWorker.register('/ISUStoPRA/sw.js')
 		.then(reg => {
 		  console.log('SW registrado', reg);
-		  // Cuando el SW esté listo/actualizado, refrescamos el chip por si cambió la versión
-		  if (reg && reg.update) {
-			reg.update().then(() => loadAppVersion()).catch(() => {});
-		  }
+		  // Refresca el chip cuando una nueva versión del SW se active
+		  reg.addEventListener('updatefound', () => {
+			const newSW = reg.installing;
+			if (!newSW) return;
+			newSW.addEventListener('statechange', () => {
+			  if (newSW.state === 'activated') loadAppVersion();
+			});
+		  });
+		  // Y también cuando el SW ya esté listo (por si acabó de activarse)
+		  navigator.serviceWorker.ready.then(() => loadAppVersion()).catch(() => {});
 		})
 		.catch(err => console.error('Error SW', err));
 	}
