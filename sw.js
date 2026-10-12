@@ -1,4 +1,4 @@
-const CACHE_NAME = 'isustopra-v2';
+const CACHE_NAME = 'isustopra-v2.1';
 
 // Lista de recursos a guardar en caché.
 // Incluye tu HTML y las librerías CDN que usas para que funcione offline.
